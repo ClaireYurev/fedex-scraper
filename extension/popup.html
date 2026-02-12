@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FedEx Invoice Scraper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>FedEx Invoice Scraper</h1>
+
+    <div id="step-prereq" class="section">
+      <p class="hint">
+        Navigate to
+        <strong>fedex.com/online/billing/cbs/invoices</strong>
+        and log in before starting.
+      </p>
+    </div>
+
+    <div class="section">
+      <label for="amounts-input">Invoice Amounts</label>
+      <textarea
+        id="amounts-input"
+        placeholder="Paste amounts separated by commas or newlines&#10;e.g. $452.67, $126.44, $87.49"
+        rows="5"
+      ></textarea>
+      <p class="hint" id="parsed-count"></p>
+    </div>
+
+    <div class="section">
+      <button id="btn-start" class="btn-primary">Start Extraction</button>
+      <button id="btn-cancel" class="btn-secondary" disabled>Cancel</button>
+    </div>
+
+    <div id="progress-section" class="section hidden">
+      <h2>Progress</h2>
+      <div class="progress-bar-container">
+        <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+      </div>
+      <p id="progress-text" class="progress-text">Initializing...</p>
+      <div id="log-container" class="log-container">
+        <ul id="log-list"></ul>
+      </div>
+    </div>
+
+    <div id="result-section" class="section hidden">
+      <h2>Complete</h2>
+      <p id="result-text"></p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
