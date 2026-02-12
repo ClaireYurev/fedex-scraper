@@ -275,10 +275,21 @@ async function runExtraction(amounts, tabId) {
       }
 
       if (!findResult || !findResult.success) {
+        const errMsg = findResult?.error || "unknown";
         sendLog(
-          `Could not find invoice for $${amount}: ${findResult?.error || "unknown"}`,
+          `Could not find invoice for $${amount}: ${errMsg}`,
           "error"
         );
+        // Log diagnostics if available
+        if (findResult?.diagnostics) {
+          const d = findResult.diagnostics;
+          sendLog(`  Diagnostics: ${d.totalTrElements} TR elements, ${d.dollarAmountsOnPage?.length || 0} amounts on page`, "error");
+          sendLog(`  Data-labels: [${d.dataLabels?.join(", ") || "none"}]`, "error");
+          sendLog(`  App components: [${d.appComponents?.join(", ") || "none"}]`, "error");
+          if (d.dollarAmountsOnPage?.length > 0) {
+            sendLog(`  Amounts visible: ${d.dollarAmountsOnPage.slice(0, 10).join(", ")}`, "error");
+          }
+        }
         allData[amount] = { invoiceNumber: "NOT FOUND", shipments: [] };
         continue;
       }
@@ -456,9 +467,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "START_EXTRACTION") {
     sendResponse({ ack: true });
     runExtraction(msg.amounts, msg.tabId);
+    return true;
   } else if (msg.type === "CANCEL_EXTRACTION") {
     cancelled = true;
     sendResponse({ ack: true });
+    return true;
   }
-  return true;
+  // Let LOG/PROGRESS/DONE messages pass through to the popup without handling
+  return false;
 });
