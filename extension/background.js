@@ -4,16 +4,16 @@
 // FedEx Invoice Scraper — Background Service Worker
 //
 // Orchestrates the multi-page scraping workflow:
-//   1. For each input amount → find invoice on list page → click it
-//   2. On invoice details → collect all tracking IDs
-//   3. For each tracking ID → open shipment details → scrape data
-//   4. Generate XLSX with one sheet per invoice amount
+//   1. For each input amount → find invoice, click it, scrape tracking IDs
+//      (all in one content script call to avoid SPA navigation issues)
+//   2. For each tracking ID → click it, wait, scrape shipment details
+//   3. Generate XLSX with one sheet per invoice amount
 // ==========================================================================
 
 let cancelled = false;
 
 // ---------------------------------------------------------------------------
-// Broadcast helpers — send messages to popup for progress/logging
+// Broadcast helpers
 // ---------------------------------------------------------------------------
 function sendProgress(percent, text) {
   chrome.runtime.sendMessage({ type: "PROGRESS", percent, text }).catch(() => {});
@@ -30,9 +30,14 @@ function sendDone(payload) {
 // ---------------------------------------------------------------------------
 // Helper: send a message to a tab's content script and await response
 // ---------------------------------------------------------------------------
-function sendToTab(tabId, message) {
+function sendToTab(tabId, message, timeout = 120000) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`sendToTab timeout (${timeout}ms) for action: ${message.action}`));
+    }, timeout);
+
     chrome.tabs.sendMessage(tabId, message, (response) => {
+      clearTimeout(timer);
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
       } else {
@@ -47,7 +52,7 @@ function sendToTab(tabId, message) {
 // ---------------------------------------------------------------------------
 async function ensureContentScript(tabId) {
   try {
-    const resp = await sendToTab(tabId, { action: "PING" });
+    const resp = await sendToTab(tabId, { action: "PING" }, 3000);
     if (resp && resp.success) return;
   } catch {
     // Content script not loaded — inject it
@@ -57,8 +62,7 @@ async function ensureContentScript(tabId) {
     target: { tabId },
     files: ["content.js"],
   });
-  // Wait for it to initialize
-  await sleep(500);
+  await sleep(1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,12 +83,21 @@ function waitForTabLoad(tabId, timeout = 30000) {
       }
     }
 
+    // Check if already complete
+    chrome.tabs.get(tabId, (tab) => {
+      if (tab && tab.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    });
+
     chrome.tabs.onUpdated.addListener(listener);
   });
 }
 
 // ---------------------------------------------------------------------------
-// Helper: random delay between 2-5 seconds (anti-bot throttle)
+// Helper: random delay (anti-bot throttle)
 // ---------------------------------------------------------------------------
 function throttle() {
   const ms = 2000 + Math.random() * 3000;
@@ -99,17 +112,18 @@ function sleep(ms) {
 // Helper: navigate a tab to a URL and wait for it to load
 // ---------------------------------------------------------------------------
 async function navigateTab(tabId, url) {
+  sendLog(`Navigating to ${url.slice(0, 60)}...`);
   await chrome.tabs.update(tabId, { url });
   await waitForTabLoad(tabId);
-  await sleep(1000); // Extra time for Angular to bootstrap
+  await sleep(2000); // Extra time for Angular to bootstrap
   await ensureContentScript(tabId);
 }
 
 // ---------------------------------------------------------------------------
-// Helper: wait for page navigation after a click (content script clicks
-// something, which triggers Angular routing) and re-inject content script
+// Helper: wait for navigation after a click, then ensure content script
+// (Used for tracking ID → shipment details navigation)
 // ---------------------------------------------------------------------------
-async function waitForNavigation(tabId, expectedUrlPart, timeout = 25000) {
+async function waitForNavAfterClick(tabId, expectedUrlPart, timeout = 30000) {
   const t0 = Date.now();
 
   while (Date.now() - t0 < timeout) {
@@ -117,31 +131,25 @@ async function waitForNavigation(tabId, expectedUrlPart, timeout = 25000) {
     try {
       const tab = await chrome.tabs.get(tabId);
       if (tab.url && tab.url.includes(expectedUrlPart)) {
-        // Wait for page to settle
         if (tab.status === "loading") {
           await waitForTabLoad(tabId);
         }
-        await sleep(1500);
+        await sleep(2000);
         await ensureContentScript(tabId);
-        return;
+        return true;
       }
-    } catch {
-      // Tab might be mid-navigation
-    }
+    } catch { /* tab mid-navigation */ }
   }
 
-  // If Angular uses client-side routing, the URL may have changed without
-  // a full page load. Just ensure content script is ready.
-  await sleep(1500);
+  // Fallback: just ensure content script is ready
+  await sleep(2000);
   await ensureContentScript(tabId);
+  return false;
 }
 
 // ---------------------------------------------------------------------------
-// XLSX generation using SheetJS loaded into the service worker
+// XLSX generation
 // ---------------------------------------------------------------------------
-
-// We import SheetJS as an IIFE that's been bundled into lib/xlsx.full.min.js
-// For Manifest V3 service workers, we use importScripts.
 try {
   importScripts("lib/xlsx.full.min.js");
 } catch (e) {
@@ -149,7 +157,6 @@ try {
 }
 
 function generateXlsx(allData) {
-  // allData: { [amount]: { invoiceNumber, shipments: [ { field: value, ... }, ... ] } }
   const wb = XLSX.utils.book_new();
 
   for (const [amount, invoiceData] of Object.entries(allData)) {
@@ -157,7 +164,6 @@ function generateXlsx(allData) {
     const shipments = invoiceData.shipments || [];
 
     if (shipments.length === 0) {
-      // Create a sheet with just headers noting no shipments found
       const ws = XLSX.utils.aoa_to_sheet([
         ["Invoice Number", invoiceData.invoiceNumber || "N/A"],
         ["Amount", `$${amount}`],
@@ -167,30 +173,17 @@ function generateXlsx(allData) {
       continue;
     }
 
-    // Collect all unique keys across shipments for this invoice
     const allKeys = new Set();
     shipments.forEach((s) => Object.keys(s).forEach((k) => allKeys.add(k)));
 
-    // Define a preferred column order
     const preferredOrder = [
-      "Tracking ID number",
-      "Invoice number",
-      "Account number",
-      "Invoice date",
-      "Due date",
-      "Status",
-      "Total billed",
-      "Tracking ID balance due",
-      "Sender Name",
-      "Sender Company",
-      "Sender Address",
-      "Sender City/State/Zip",
-      "Sender Country",
-      "Recipient Name",
-      "Recipient Company",
-      "Recipient Address",
-      "Recipient City/State/Zip",
-      "Recipient Country",
+      "Tracking ID number", "Invoice number", "Account number",
+      "Invoice date", "Due date", "Status",
+      "Total billed", "Tracking ID balance due",
+      "Sender Name", "Sender Company", "Sender Address",
+      "Sender City/State/Zip", "Sender Country",
+      "Recipient Name", "Recipient Company", "Recipient Address",
+      "Recipient City/State/Zip", "Recipient Country",
     ];
 
     const orderedKeys = [];
@@ -200,36 +193,22 @@ function generateXlsx(allData) {
         allKeys.delete(pk);
       }
     }
-    // Append remaining keys alphabetically
-    const remaining = [...allKeys].sort();
-    orderedKeys.push(...remaining);
+    orderedKeys.push(...[...allKeys].sort());
 
-    // Build rows
     const header = orderedKeys;
     const rows = shipments.map((s) => orderedKeys.map((k) => s[k] || ""));
-    const wsData = [header, ...rows];
-
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-
-    // Auto-size columns (approximate)
-    ws["!cols"] = orderedKeys.map((key) => {
-      const maxLen = Math.max(
-        key.length,
-        ...rows.map((r) => (r[orderedKeys.indexOf(key)] || "").toString().length)
-      );
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws["!cols"] = orderedKeys.map((key, idx) => {
+      const maxLen = Math.max(key.length, ...rows.map((r) => (r[idx] || "").toString().length));
       return { wch: Math.min(maxLen + 2, 50) };
     });
-
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   }
 
-  // Write to binary
-  const wbOut = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  return wbOut;
+  return XLSX.write(wb, { bookType: "xlsx", type: "array" });
 }
 
 function sanitizeSheetName(name) {
-  // Excel sheet names: max 31 chars, no []:*?/\
   return name.replace(/[[\]:*?/\\]/g, "_").slice(0, 31);
 }
 
@@ -240,7 +219,6 @@ async function runExtraction(amounts, tabId) {
   cancelled = false;
   const allData = {};
   const totalSteps = amounts.length;
-  const invoiceListUrl = "fedex.com/online/billing/cbs/invoices";
 
   try {
     for (let i = 0; i < amounts.length; i++) {
@@ -252,121 +230,112 @@ async function runExtraction(amounts, tabId) {
 
       const amount = amounts[i];
       const pctBase = (i / totalSteps) * 100;
-      sendProgress(pctBase, `Processing amount $${amount} (${i + 1}/${totalSteps})`);
+      sendProgress(pctBase, `Processing $${amount} (${i + 1}/${totalSteps})`);
       sendLog(`--- Processing $${amount} (${i + 1}/${totalSteps}) ---`);
 
-      // Step 1: Navigate back to the invoice list page
-      sendLog("Navigating to invoice list...");
+      // Step 1: Navigate to the invoice list page (fresh load each time)
       await navigateTab(tabId, "https://www.fedex.com/online/billing/cbs/invoices");
       await throttle();
 
-      // Step 2: Find and click the matching invoice
+      // Step 2: Combined find + click + wait for navigation + scrape tracking IDs
+      // All done inside one content script call to survive Angular SPA routing
       sendLog(`Searching for invoice with amount $${amount}...`);
-      let findResult;
+      let result;
       try {
-        findResult = await sendToTab(tabId, {
-          action: "FIND_AND_CLICK_INVOICE",
+        result = await sendToTab(tabId, {
+          action: "FIND_CLICK_AND_SCRAPE",
           amount,
-        });
+        }, 90000); // 90 second timeout for the combined operation
       } catch (err) {
-        sendLog(`Error finding invoice: ${err.message}`, "error");
+        sendLog(`Error in combined find/scrape: ${err.message}`, "error");
         allData[amount] = { invoiceNumber: "ERROR", shipments: [] };
         continue;
       }
 
-      if (!findResult || !findResult.success) {
-        const errMsg = findResult?.error || "unknown";
-        sendLog(
-          `Could not find invoice for $${amount}: ${errMsg}`,
-          "error"
-        );
-        // Log diagnostics if available
-        if (findResult?.diagnostics) {
-          const d = findResult.diagnostics;
-          sendLog(`  Diagnostics: ${d.totalTrElements} TR elements, ${d.dollarAmountsOnPage?.length || 0} amounts on page`, "error");
+      if (!result || !result.success) {
+        sendLog(`Invoice not found for $${amount}: ${result?.error || "unknown"}`, "error");
+        if (result?.diagnostics) {
+          const d = result.diagnostics;
+          sendLog(`  Page: ${d.url}`, "error");
           sendLog(`  Data-labels: [${d.dataLabels?.join(", ") || "none"}]`, "error");
-          sendLog(`  App components: [${d.appComponents?.join(", ") || "none"}]`, "error");
-          if (d.dollarAmountsOnPage?.length > 0) {
-            sendLog(`  Amounts visible: ${d.dollarAmountsOnPage.slice(0, 10).join(", ")}`, "error");
-          }
+          sendLog(`  Components: [${d.appComponents?.join(", ") || "none"}]`, "error");
         }
         allData[amount] = { invoiceNumber: "NOT FOUND", shipments: [] };
         continue;
       }
 
-      sendLog(`Found invoice #${findResult.invoiceNumber}`, "success");
+      sendLog(`Found invoice #${result.invoiceNumber}`, "success");
 
-      // Step 3: Wait for invoice details page to load
-      await waitForNavigation(tabId, "invoice-details");
-      await throttle();
+      const trackingIds = result.trackingIds || [];
+      sendLog(`Found ${trackingIds.length} tracking ID(s): [${trackingIds.join(", ")}]`,
+        trackingIds.length > 0 ? "success" : "error");
 
-      // Step 4: Scrape tracking IDs from the invoice details page
-      sendLog("Scraping tracking IDs...");
-      let trackingResult;
-      try {
-        trackingResult = await sendToTab(tabId, {
-          action: "SCRAPE_TRACKING_IDS",
-        });
-      } catch (err) {
-        sendLog(`Error scraping tracking IDs: ${err.message}`, "error");
-        allData[amount] = {
-          invoiceNumber: findResult.invoiceNumber,
-          shipments: [],
-        };
-        continue;
+      if (result.diagnostics) {
+        const d = result.diagnostics;
+        sendLog(`  Post-nav URL: ${d.url}`);
+        sendLog(`  Post-nav data-labels: [${d.dataLabels?.join(", ") || "none"}]`);
+        sendLog(`  Post-nav tracking links: [${d.trackingLikeLinks?.join(", ") || "none"}]`);
       }
-
-      const trackingIds = trackingResult?.trackingIds || [];
-      sendLog(`Found ${trackingIds.length} tracking ID(s)`, "success");
 
       if (trackingIds.length === 0) {
         allData[amount] = {
-          invoiceNumber: findResult.invoiceNumber,
+          invoiceNumber: result.invoiceNumber,
           shipments: [],
         };
         continue;
       }
 
-      // Step 5: For each tracking ID, navigate to shipment details and scrape
+      // Step 3: For each tracking ID, visit shipment details and scrape
       const shipments = [];
       for (let j = 0; j < trackingIds.length; j++) {
         if (cancelled) break;
 
         const tid = trackingIds[j];
         const subPct = pctBase + ((j + 1) / trackingIds.length / totalSteps) * 100;
-        sendProgress(
-          subPct,
-          `$${amount}: Shipment ${j + 1}/${trackingIds.length} (${tid})`
-        );
+        sendProgress(subPct, `$${amount}: Shipment ${j + 1}/${trackingIds.length}`);
         sendLog(`  Opening shipment ${tid} (${j + 1}/${trackingIds.length})...`);
 
-        // We need to be on the invoice details page to click the tracking ID.
-        // If we navigated away for a previous tracking ID, go back.
+        // If not the first tracking ID, we need to go back to invoice details
         if (j > 0) {
-          // Navigate back to invoice details
+          sendLog("  Navigating back to invoice details...");
           try {
-            await sendToTab(tabId, { action: "NAVIGATE_BACK" });
-          } catch {
-            // If content script is gone, navigate manually
+            await sendToTab(tabId, { action: "NAVIGATE_BACK" }, 5000);
+          } catch { /* may fail if page reloaded */ }
+
+          // Wait for invoice details page via content script
+          try {
+            await sendToTab(tabId, { action: "WAIT_FOR_INVOICE_DETAILS" }, 30000);
+          } catch (err) {
+            sendLog(`  Back-nav failed: ${err.message}`, "error");
+            await ensureContentScript(tabId);
           }
-          await waitForNavigation(tabId, "invoice-details");
           await throttle();
-          await ensureContentScript(tabId);
         }
 
         // Click the tracking ID link
         try {
-          await sendToTab(tabId, {
+          const clickResult = await sendToTab(tabId, {
             action: "CLICK_TRACKING_ID",
             trackingId: tid,
-          });
+          }, 10000);
+
+          if (!clickResult || !clickResult.success) {
+            sendLog(`  Could not click tracking ID ${tid}`, "error");
+            continue;
+          }
         } catch (err) {
           sendLog(`  Error clicking tracking ID ${tid}: ${err.message}`, "error");
           continue;
         }
 
-        // Wait for shipment details page
-        await waitForNavigation(tabId, "shipment-details");
+        // Wait for shipment details page — use content script's URL watcher
+        try {
+          await sendToTab(tabId, { action: "WAIT_FOR_SHIPMENT_PAGE" }, 30000);
+        } catch (err) {
+          sendLog(`  Shipment page wait failed: ${err.message}`, "error");
+          // Try background-level URL detection as fallback
+          await waitForNavAfterClick(tabId, "shipment-detail", 15000);
+        }
         await throttle();
 
         // Scrape shipment details
@@ -374,39 +343,37 @@ async function runExtraction(amounts, tabId) {
         try {
           shipmentResult = await sendToTab(tabId, {
             action: "SCRAPE_SHIPMENT_DETAILS",
-          });
+          }, 30000);
         } catch (err) {
           sendLog(`  Error scraping shipment ${tid}: ${err.message}`, "error");
           continue;
         }
 
         if (shipmentResult && shipmentResult.success && shipmentResult.data) {
+          const fieldCount = Object.keys(shipmentResult.data).length;
           shipments.push(shipmentResult.data);
-          sendLog(`  Scraped shipment ${tid}`, "success");
+          sendLog(`  Scraped shipment ${tid} (${fieldCount} fields)`, "success");
         } else {
-          sendLog(
-            `  No data for shipment ${tid}: ${shipmentResult?.error || "empty"}`,
-            "error"
-          );
+          sendLog(`  Empty data for ${tid}: ${shipmentResult?.error || "no fields"}`, "error");
         }
 
         await throttle();
       }
 
       allData[amount] = {
-        invoiceNumber: findResult.invoiceNumber,
+        invoiceNumber: result.invoiceNumber,
         shipments,
       };
 
       sendLog(
-        `Completed $${amount}: ${shipments.length} shipment(s) scraped`,
-        "success"
+        `Completed $${amount}: ${shipments.length} shipment(s)`,
+        shipments.length > 0 ? "success" : "error"
       );
     }
 
-    // Step 6: Generate XLSX
+    // Step 4: Generate XLSX
     sendProgress(95, "Generating Excel file...");
-    sendLog("Generating XLSX file...");
+    sendLog("Generating XLSX...");
 
     let xlsxBuffer;
     try {
@@ -417,8 +384,7 @@ async function runExtraction(amounts, tabId) {
       return;
     }
 
-    // Step 7: Download the file
-    // Service workers don't have Blob/URL.createObjectURL, so use a data URL
+    // Step 5: Download
     const uint8 = new Uint8Array(xlsxBuffer);
     let binary = "";
     for (let k = 0; k < uint8.length; k++) {
@@ -426,8 +392,7 @@ async function runExtraction(amounts, tabId) {
     }
     const base64 = btoa(binary);
     const dataUrl =
-      "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," +
-      base64;
+      "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + base64;
     const timestamp = new Date().toISOString().slice(0, 10);
 
     chrome.downloads.download(
@@ -442,15 +407,11 @@ async function runExtraction(amounts, tabId) {
           sendDone({ error: chrome.runtime.lastError.message });
         } else {
           const totalShipments = Object.values(allData).reduce(
-            (sum, d) => sum + d.shipments.length,
-            0
+            (sum, d) => sum + d.shipments.length, 0
           );
           sendProgress(100, "Done!");
-          sendLog("XLSX file downloaded successfully!", "success");
-          sendDone({
-            shipmentCount: totalShipments,
-            invoiceCount: amounts.length,
-          });
+          sendLog("XLSX downloaded!", "success");
+          sendDone({ shipmentCount: totalShipments, invoiceCount: amounts.length });
         }
       }
     );
@@ -473,6 +434,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ack: true });
     return true;
   }
-  // Let LOG/PROGRESS/DONE messages pass through to the popup without handling
   return false;
 });
