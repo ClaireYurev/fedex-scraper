@@ -128,6 +128,32 @@ function waitForDataLabel(labelName, timeout = 25000) {
 }
 
 // ---------------------------------------------------------------------------
+// Utility: find a clickable element (button OR anchor) within a container
+// FedEx uses <button class="fdx-c-button--text"> instead of <a> tags
+// ---------------------------------------------------------------------------
+function findClickable(container) {
+  return container.querySelector("button.fdx-c-button--text") ||
+         container.querySelector("button.fdx-c-button") ||
+         container.querySelector("button") ||
+         container.querySelector("a") ||
+         container.querySelector("[role='link']") ||
+         container.querySelector("[role='button']");
+}
+
+// ---------------------------------------------------------------------------
+// Utility: dispatch a proper click event (works with Angular event handlers)
+// ---------------------------------------------------------------------------
+function simulateClick(el) {
+  if (!el) return;
+  // Angular listens for real DOM events, so dispatch a full MouseEvent
+  el.dispatchEvent(new MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Utility: small random delay (anti-bot throttle)
 // ---------------------------------------------------------------------------
 function throttle() {
@@ -185,15 +211,19 @@ function diagnosePage() {
   const amountMatches = bodyText.match(/\$[\d,]+\.\d{2}/g);
   info.dollarAmountsOnPage = amountMatches ? [...new Set(amountMatches)].slice(0, 30) : [];
 
-  // Count links that look like tracking numbers
+  // Count clickable elements (buttons AND links) that look like tracking numbers
   const trackingLikeLinks = [];
-  document.querySelectorAll("a").forEach((a) => {
-    const text = a.textContent.trim();
+  document.querySelectorAll("a, button").forEach((el) => {
+    const text = el.textContent.trim();
     if (/^\d{10,22}$/.test(text)) {
-      trackingLikeLinks.push(text);
+      trackingLikeLinks.push(`${text} (${el.tagName})`);
     }
   });
   info.trackingLikeLinks = trackingLikeLinks;
+
+  // Count buttons specifically (FedEx uses buttons not links)
+  info.totalButtons = document.querySelectorAll("button").length;
+  info.fdxButtons = document.querySelectorAll("button.fdx-c-button--text").length;
 
   const appComponents = new Set();
   document.querySelectorAll("*").forEach((el) => {
@@ -267,8 +297,7 @@ function scrapeInvoiceRows(tableBody) {
       cellMap["invoiceNumber"] || cellMap["INVOICE_NUMBER"] || cellMap["invoice"];
 
     if (invoiceCell && amountCell) {
-      const link = invoiceCell.el.querySelector("a") ||
-                   invoiceCell.el.querySelector("[role='link']") || invoiceCell.el;
+      const link = findClickable(invoiceCell.el) || invoiceCell.el;
       results.push({
         invoiceNumber: invoiceCell.text,
         amount: normalizeAmount(amountCell.text),
@@ -287,7 +316,7 @@ function scrapeInvoiceRows(tableBody) {
       const text = td.textContent.trim();
       const amtMatch = text.match(/^\$?([\d,]+\.\d{2})$/);
       if (amtMatch && !foundAmount) foundAmount = normalizeAmount(amtMatch[1]);
-      const linkEl = td.querySelector("a");
+      const linkEl = findClickable(td);
       if (linkEl && !foundLink) {
         foundLink = linkEl;
         foundInvoiceNum = linkEl.textContent.trim();
@@ -307,7 +336,7 @@ function scrapeInvoiceRows(tableBody) {
     // Strategy C: full text scan of the row
     const rowText = row.textContent;
     const allAmounts = rowText.match(/\$[\d,]+\.\d{2}/g);
-    const link = row.querySelector("a");
+    const link = findClickable(row) || row.querySelector("a");
     if (allAmounts && link) {
       for (const amt of allAmounts) {
         results.push({
@@ -421,7 +450,7 @@ async function findClickAndScrapeInvoice(targetAmount) {
       for (let i = 0; i < 10 && el; i++) {
         if (el.tagName === "TR" || el.classList.contains("fdx-c-table__tbody__tr") ||
             el.classList.contains("invoice-grid-item")) {
-          const link = el.querySelector("a");
+          const link = findClickable(el) || el.querySelector("a");
           if (link) {
             matchedInvoice = {
               invoiceNumber: link.textContent.trim(),
@@ -450,7 +479,8 @@ async function findClickAndScrapeInvoice(targetAmount) {
   debugLog(`MATCH: invoice #${matchedInvoice.invoiceNumber} via ${matchedInvoice.strategy}`);
 
   // --- CLICK THE INVOICE LINK ---
-  matchedInvoice.linkEl.click();
+  debugLog(`Clicking element: <${matchedInvoice.linkEl.tagName}> class="${matchedInvoice.linkEl.className}"`);
+  simulateClick(matchedInvoice.linkEl);
   debugLog("Clicked invoice link. Waiting for navigation...");
 
   // --- WAIT FOR THE INVOICE DETAILS PAGE TO LOAD ---
@@ -496,42 +526,40 @@ async function findClickAndScrapeInvoice(targetAmount) {
   debugLog(`Post-nav tracking-like links: [${postNavDiag.trackingLikeLinks.join(", ")}]`);
   debugLog(`Post-nav app-components: [${postNavDiag.appComponents.join(", ")}]`);
 
-  // Strategy 1: data-label approach
-  document.querySelectorAll("[data-label]").forEach((td) => {
-    const label = td.getAttribute("data-label");
-    if (label === "trackingNumber" || label === "TRACKING_ID" || label === "trackingId") {
-      const text = td.textContent.trim();
-      if (text && !trackingIds.includes(text)) {
-        trackingIds.push(text);
-      }
+  // Strategy 1: data-label approach (FedEx uses <td data-label="trackingNumber"><button>...</button></td>)
+  document.querySelectorAll('[data-label="trackingNumber"], [data-label="TRACKING_ID"], [data-label="trackingId"]').forEach((td) => {
+    // Get the button or link text inside, not the full td text
+    const btn = td.querySelector("button") || td.querySelector("a");
+    const text = btn ? btn.textContent.trim() : td.textContent.trim();
+    if (text && /\d{10,}/.test(text) && !trackingIds.includes(text)) {
+      trackingIds.push(text);
     }
   });
   debugLog(`Strategy 1 (data-label): ${trackingIds.length} tracking IDs`);
 
-  // Strategy 2: links with digit-only text in tables
+  // Strategy 2: buttons/links with digit-only text in tables
   if (trackingIds.length === 0) {
-    document.querySelectorAll("a").forEach((a) => {
-      const text = a.textContent.trim();
+    document.querySelectorAll("button, a").forEach((el) => {
+      const text = el.textContent.trim();
       if (/^\d{10,22}$/.test(text)) {
-        const href = a.getAttribute("href") || "";
-        if (href.includes("shipment") || href.includes("tracking") ||
-            a.closest("table") || a.closest("[class*='table']")) {
+        if (el.closest("table") || el.closest("[class*='table']") ||
+            el.closest("app-shipment-table") || el.closest("app-invoice-detail")) {
           if (!trackingIds.includes(text)) trackingIds.push(text);
         }
       }
     });
-    debugLog(`Strategy 2 (link-digit): ${trackingIds.length} tracking IDs`);
+    debugLog(`Strategy 2 (table-digit): ${trackingIds.length} tracking IDs`);
   }
 
-  // Strategy 3: ANY links with pure digit text
+  // Strategy 3: ANY buttons/links with pure digit text
   if (trackingIds.length === 0) {
-    document.querySelectorAll("a").forEach((a) => {
-      const text = a.textContent.trim();
+    document.querySelectorAll("button, a").forEach((el) => {
+      const text = el.textContent.trim();
       if (/^\d{10,22}$/.test(text) && !trackingIds.includes(text)) {
         trackingIds.push(text);
       }
     });
-    debugLog(`Strategy 3 (all-digit-links): ${trackingIds.length} tracking IDs`);
+    debugLog(`Strategy 3 (all-digit-clickables): ${trackingIds.length} tracking IDs`);
   }
 
   // Strategy 4: look for tracking numbers in the page text
@@ -542,11 +570,10 @@ async function findClickAndScrapeInvoice(targetAmount) {
     if (matches) {
       const unique = [...new Set(matches)];
       debugLog(`Strategy 4 (regex): found ${unique.length} digit sequences: ${unique.join(", ")}`);
-      // Only include if they're actually clickable
+      // Only include if they're actually clickable (button or link)
       for (const num of unique) {
-        const links = document.querySelectorAll("a");
-        for (const a of links) {
-          if (a.textContent.trim().includes(num)) {
+        for (const el of document.querySelectorAll("button, a")) {
+          if (el.textContent.trim().includes(num)) {
             if (!trackingIds.includes(num)) trackingIds.push(num);
             break;
           }
@@ -573,23 +600,32 @@ async function findClickAndScrapeInvoice(targetAmount) {
 async function clickTrackingId(trackingId) {
   debugLog(`Clicking tracking ID: ${trackingId}`);
 
-  // Strategy 1: data-label cells
-  for (const td of document.querySelectorAll("[data-label]")) {
-    const label = td.getAttribute("data-label");
-    if ((label === "trackingNumber" || label === "TRACKING_ID" || label === "trackingId") &&
-        td.textContent.trim() === trackingId) {
-      const link = td.querySelector("a") || td;
-      link.click();
-      debugLog("Clicked via data-label");
+  // Strategy 1: data-label cells (FedEx uses <td data-label="trackingNumber"><button>...</button></td>)
+  for (const td of document.querySelectorAll('[data-label="trackingNumber"], [data-label="TRACKING_ID"], [data-label="trackingId"]')) {
+    const btn = td.querySelector("button") || td.querySelector("a");
+    const text = btn ? btn.textContent.trim() : td.textContent.trim();
+    if (text === trackingId) {
+      const target = btn || td;
+      debugLog(`Clicking via data-label: <${target.tagName}> class="${target.className}"`);
+      simulateClick(target);
       return true;
     }
   }
 
-  // Strategy 2: any link with this text
+  // Strategy 2: any button with this text
+  for (const btn of document.querySelectorAll("button")) {
+    if (btn.textContent.trim() === trackingId) {
+      debugLog(`Clicking via button text match: class="${btn.className}"`);
+      simulateClick(btn);
+      return true;
+    }
+  }
+
+  // Strategy 3: any link with this text
   for (const a of document.querySelectorAll("a")) {
     if (a.textContent.trim() === trackingId) {
-      a.click();
       debugLog("Clicked via link text match");
+      simulateClick(a);
       return true;
     }
   }
