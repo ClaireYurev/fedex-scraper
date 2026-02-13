@@ -287,23 +287,34 @@ function scrapeInvoiceRows(tableBody) {
       if (label) cellMap[label] = { text: td.textContent.trim(), el: td };
     });
 
-    const amountCell =
-      cellMap["currentBalanceStr"] || cellMap["originalAmountStr"] ||
-      cellMap["currentBalance"] || cellMap["originalAmount"] ||
-      cellMap["amount"] || cellMap["ORIGINAL_AMOUNT_DUE"] ||
-      cellMap["CURRENT_BALANCE"] || cellMap["balance"];
+    // Prioritize originalAmountStr — currentBalanceStr is $0.00 for closed invoices
+    const originalAmountCell =
+      cellMap["originalAmountStr"] || cellMap["originalAmount"] ||
+      cellMap["ORIGINAL_AMOUNT_DUE"];
+
+    const currentBalanceCell =
+      cellMap["currentBalanceStr"] || cellMap["currentBalance"] ||
+      cellMap["CURRENT_BALANCE"] || cellMap["balance"] || cellMap["amount"];
 
     const invoiceCell =
       cellMap["invoiceNumber"] || cellMap["INVOICE_NUMBER"] || cellMap["invoice"];
 
-    if (invoiceCell && amountCell) {
+    if (invoiceCell && (originalAmountCell || currentBalanceCell)) {
       const link = findClickable(invoiceCell.el) || invoiceCell.el;
-      results.push({
-        invoiceNumber: invoiceCell.text,
-        amount: normalizeAmount(amountCell.text),
-        linkEl: link,
-        strategy: "data-label",
-      });
+      // Add a result for each non-empty amount so the user can match against
+      // either the original amount or the current balance
+      const amounts = new Set();
+      if (originalAmountCell) amounts.add(normalizeAmount(originalAmountCell.text));
+      if (currentBalanceCell) amounts.add(normalizeAmount(currentBalanceCell.text));
+
+      for (const amt of amounts) {
+        results.push({
+          invoiceNumber: invoiceCell.text,
+          amount: amt,
+          linkEl: link,
+          strategy: "data-label",
+        });
+      }
       return;
     }
 
@@ -403,8 +414,10 @@ async function findClickAndScrapeInvoice(targetAmount) {
 
   if (tableResult) {
     const invoices = scrapeInvoiceRows(tableResult.tableBody);
-    debugLog(`Scraped ${invoices.length} invoice row(s)`);
-    for (let i = 0; i < Math.min(5, invoices.length); i++) {
+    // Count unique invoice numbers for logging
+    const uniqueInvNums = [...new Set(invoices.map(r => r.invoiceNumber))];
+    debugLog(`Scraped ${invoices.length} entries from ${uniqueInvNums.length} invoice row(s)`);
+    for (let i = 0; i < Math.min(10, invoices.length); i++) {
       debugLog(`  Row: inv="${invoices[i].invoiceNumber}" amt="${invoices[i].amount}" [${invoices[i].strategy}]`);
     }
 
