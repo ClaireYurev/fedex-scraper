@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "FedEx Invoice Scraper",
-  "version": "1.0.0",
-  "description": "Automates data extraction from FedEx Billing Online portal, generating Excel reports per invoice.",
+  "name": "FedEx Invoice Analyzer",
+  "version": "3.7.0",
+  "description": "Automates invoice data extraction from FedEx Billing Online, generating Excel reports with shipment details per invoice.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -17,7 +17,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "FedEx Invoice Scraper"
+    "default_title": "FedEx Invoice Analyzer v3.7"
   },
   "content_scripts": [
     {

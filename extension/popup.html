@@ -3,51 +3,87 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FedEx Invoice Scraper</title>
+  <title>FedEx Invoice Analyzer</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="container">
-    <h1>FedEx Invoice Scraper</h1>
-
-    <div id="step-prereq" class="section">
-      <p class="hint">
-        Navigate to
-        <strong>fedex.com/online/billing/cbs/invoices</strong>
-        and log in before starting.
-      </p>
-    </div>
-
-    <div class="section">
-      <label for="amounts-input">Invoice Amounts</label>
-      <textarea
-        id="amounts-input"
-        placeholder="Paste amounts separated by commas or newlines&#10;e.g. $452.67, $126.44, $87.49"
-        rows="5"
-      ></textarea>
-      <p class="hint" id="parsed-count"></p>
-    </div>
-
-    <div class="section">
-      <button id="btn-start" class="btn-primary">Start Extraction</button>
-      <button id="btn-cancel" class="btn-secondary" disabled>Cancel</button>
-    </div>
-
-    <div id="progress-section" class="section hidden">
-      <h2>Progress</h2>
-      <div class="progress-bar-container">
-        <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-content">
+        <div class="brand">
+          <svg class="brand-icon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+          </svg>
+          <div>
+            <h1 class="brand-title">FedEx Invoice Analyzer</h1>
+            <span class="version-badge">v3.7</span>
+          </div>
+        </div>
+        <div id="status-dot" class="status-dot status-idle" title="Idle"></div>
       </div>
-      <p id="progress-text" class="progress-text">Initializing...</p>
+    </header>
+
+    <!-- Prereq Banner -->
+    <div id="prereq-banner" class="banner">
+      <svg class="banner-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      <span>Navigate to <strong>fedex.com/online/billing</strong> and log in before starting.</span>
+    </div>
+
+    <!-- Input Card -->
+    <div class="card">
+      <label for="amounts-input" class="input-label">Invoice Amounts</label>
+      <div class="textarea-wrap">
+        <textarea
+          id="amounts-input"
+          placeholder="Paste amounts separated by commas or newlines&#10;e.g. $452.67, $126.44, $87.49"
+          rows="4"
+          spellcheck="false"
+        ></textarea>
+        <span id="parsed-count" class="parsed-badge"></span>
+      </div>
+
+      <div class="btn-row">
+        <button id="btn-start" class="btn btn-primary">
+          <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Start Analysis
+        </button>
+        <button id="btn-cancel" class="btn btn-ghost" disabled>Cancel</button>
+      </div>
+    </div>
+
+    <!-- Progress Section -->
+    <div id="progress-section" class="card hidden">
+      <div class="progress-header">
+        <span class="card-label">Processing</span>
+        <span id="progress-pct" class="progress-pct">0%</span>
+      </div>
+      <div class="progress-track">
+        <div id="progress-bar" class="progress-fill" style="width: 0%"></div>
+      </div>
+      <p id="progress-text" class="progress-status">Initializing...</p>
+
       <div id="log-container" class="log-container">
-        <ul id="log-list"></ul>
+        <div id="log-list" class="log-list"></div>
       </div>
     </div>
 
-    <div id="result-section" class="section hidden">
-      <h2>Complete</h2>
-      <p id="result-text"></p>
+    <!-- Result Section -->
+    <div id="result-section" class="card hidden">
+      <div id="result-content" class="result-content">
+        <div id="result-icon" class="result-icon"></div>
+        <p id="result-text" class="result-text"></p>
+      </div>
     </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>FedEx Invoice Analyzer v3.7</span>
+    </footer>
   </div>
 
   <script src="popup.js"></script>
